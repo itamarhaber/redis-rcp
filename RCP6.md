@@ -56,8 +56,12 @@ When using `FORALL` with `WITHREPLIES`, the return value will be made up of a mu
 3. Multi-bulk string with array of elements - unchanged
 
 ## Executed operation
-The operation executed can be virtually any of the supported API commands. That said, it could be wise to put some obvious  safe guards in place:
-- `SCAN`s cannot call other `SCAN`s
+The operation executed can be virtually any of the supported API commands. That said, it could be wise to put some obvious  safe guards in place in terms of disallowed operations:
+- `SCAN`s cannot call other `SCAN`s (no incest)
+- `SUBSCRIBE` and `PSUBSCRIBE`
+- `MONITOR` and probaly most other Server commands (but `TIME` may be an exception)
+- Tx commands: `WATCH`, `UNWATCH`, `MULTI`, `EXEC` and `DISCARD`
+- Client commands
 
 ### Return value handling
 Since the operation can be made up of any Redis command, the operation's return value is determined by it. When using the `WITHREPLIES` switch, the user is responsible for correctly handling the reply.
