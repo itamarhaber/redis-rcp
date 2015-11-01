@@ -6,15 +6,16 @@ Author: Itamar Haber <itamar@redislabs.com>
 Creation date: 2015-10-21
 Update date: 2015-11-01
 Status: wip
-Version: 1.0.1
+Version: 1.0.2
 Implementation: none
 ````
 
 History
 ---
 
-* Version 1.0 (2015-10-26): Initial version.
+* Version 1.0   (2015-10-26): Initial version.
 * Version 1.0.1 (2015-11-01): Internal review - conceptual API fleshout, clearer implementation guidelines.
+* Version 1.0.2 (2015-11-01): Interacting with Redis' state
 
 Rationale
 ---
@@ -116,6 +117,10 @@ Just like `DOEVAL` but returns a pretty print of the value (but the error remain
     DOEXEC statement
 
 Executes the statement in the current Lua context. Returns "OK" or an error.
+
+    DOCALL redis-command [arg [arg...]]
+
+During a debug session we want to allow the debugging user to read and write the contents of Redis. One way of allowing this could be by supporting the full API inside the context of a debug session, but that would blur the distinction between the debug and regular contexts. Instead, interacting with the database should be done from the debug context itself, specifically with `DOEXEC "redis.call('redis-command', arg, ...)"`. This command is just syntactic sugar for that.
 
 ### Watches management
 
