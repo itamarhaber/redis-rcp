@@ -4,9 +4,9 @@ Redis Lua debugger
 ````
 Author: Itamar Haber <itamar@redislabs.com>
 Creation date: 2015-10-21
-Update date: 2015-10-26
-Status: open
-Version: 1.0
+Update date: 2015-11-01
+Status: wip
+Version: 1.0.1
 Implementation: none
 ````
 
@@ -14,13 +14,14 @@ History
 ---
 
 * Version 1.0 (2015-10-26): Initial version.
+* Version 1.0.1 (2015-11-01): Internal review - conceptual API fleshout, clearer implementation guidelines.
 
 Rationale
 ---
 
 As of v2.6, Redis includes the ability for executing server-side Lua scripts. It is a shame, however, that there is no sane way to develop such scripts since tracing their execution, let alone debugging, is taxing.
 
-This proposal describes how a full-blown Lua debugger can be integrated in the Redis project to make Lua scripts' development and maintenance fun.
+This proposal describes how a Lua debugger can be added to the Redis project to make Lua scripts' development fun.
 
 Current state of developing Lua scripts for Redis
 ---
@@ -36,59 +37,177 @@ Lastly, a [workflow][9] that simulates Redis' embedded Lua runtime has been deve
 Commands introduced
 ---
 
-    SCRIPT DEBUG [LOCAL|REMOTE host port] script numkeys key [key ...] arg [arg ...]
+    DEVAL script numkeys key [key ...] arg [arg ...]
 
-The `SCRIPT DEBUG` command initiates a debug client for the specified script. The `LOCAL` directive (default) indicates that that debug server will be run inside the Redis server and that current connection will be used for its IO. By specifying a remote server, the debug client will connect to that server.
+The `DEVAL` command (Debug + EVAL, and because the devil's in the details) initiates a debug session for the specified script. The session begins after the script is set up for execution and before its first line is executed. When put in debug as well as upon returning to debug mode from executing the script (e.g. when encountering a breakpoint, after stepping into/over/out, ...), the reply would be the current line of code where execution stopped. The following example demonstrates a simple debug session:
 
-Implementation details
+````
+127.0.0.1:6379> DEVAL "return 42" 0
+"1"
+127.0.0.1:6379 (debug)> RUN
+"OK"
+127.0.0.1:6379 (debug)> GETRETURN
+"42"
+127.0.0.1:6379 (debug)> END
+"42"
+127.0.0.1:6379>
+````
+
+During a debug session, the user can only use the following debug-specific commands.
+
+### Debugger control
+
+    RUN [line [line...]]
+
+Runs the script until it exits, or a breakpoint is encountered. Specifying one or more line numbers is the equivalent of creating breakpoints for these lines. Possible replies:
+
+* If the script exits normally (end of script or `return` statement), the return value is `OK`
+* If the script errors, the return value is the error raised
+* If the script breaks, the return value is the relevant breakpoint-id
+
+A smart debugging client will automatically call `GETRETURN` when getting the `OK` to display the script's return value after successful execution. Similarly, the smart ones will call `BLIST`  with the relevant breakpoint-id and/or `GETCODE` to provide the context after breaking.
+
+    RESTART [FLUSH]
+
+Restarts the execution of the debugged script while keeping the debug session context intact (watches, breakpoints). Given the `FLUSH` switch, the context is reset as well. This command never fails :) Should be followed by `RUN` for example.
+
+    STEPINTO / STEPOVER / STEPOUT
+
+Breaks on the execution of the next statement, stepping into/over/out of function calls. Returns the current line number.
+
+    END
+
+Ends the debugging session, but completes the script's execution before. Any breakpoints are ignored. Returns the script's return value or an error if raised.
+
+    ABORT
+
+Aborts the debugging session, halting the script's execution if it is still ongoing.
+
+### Inspection commands
+
+    TRON [LINE | [CODE | STACK | WATCH | ALL]]
+
+Turns on tracing, namely returning information about the steps of execution. The default `LINE` switch traces the line number. When `CODE`, `STACK` or `WATCH` are used, the reply consists of the current LoC number and Lua code, stack dump or the evaluated watch list, respectively . `ALL` means just that. When called the first time, it returns the requested information and repeats that for every step until `TROFF`, `QUIT` or `ABORT` are used.
+
+    TROFF
+
+Turns off tracing.
+
+    GETCODE [line]
+
+Returns the actual Lua code at the specified line. If no line is given, the current line is returned.
+
+    GETRETURN
+
+Returns the debugged script return value, unless the script is still running, in which case -ERR is returned.
+
+    GETSTACK
+
+Returns a stack trace [TBD].
+
+    DOEVAL expression
+
+Evaluates the expression in the current Lua context and returns its value or an error.
+
+    DOPRINT expression
+
+Just like `DOEVAL` but returns a pretty print of the value (but the error remains ugly). Pretty print of values mainly means table handling.
+
+    DOEXEC statement
+
+Executes the statement in the current Lua context. Returns "OK" or an error.
+
+### Watches management
+
+    WADD "expression" ["expression"...]
+
+Adds a watched expression(s). Returns the watch-id(s), which is(are) the sequence number(s) of the added watch(s) in the list of watches (zero-based of course).
+
+    WREM watch-id [watch-id...]
+
+Removes watch(es) from the list by id. If watch is also a breakpoint, removes it from the breakpoints list as well. Reply is the new length of the watches list.
+
+    WCOUNT
+
+Returns the length of the watches list.
+
+    WEVAL [watch-id [watch-id...]]
+
+Evaluates all (default) or specific watch-ids and returns their results.
+
+    WLIST [start end] [RAW]
+
+Returns the list of watched expressions as an array. Allows ranges using the usual conventions and by default performs 0 -1. When the `RAW` switch is used, output is a single string suitable for using with the `WADD` command
+
+    WFLUSH
+
+Clears the watches list.
+
+### Breakpoint/watchpoint management
+
+    BADD [[LINE] line [line...] | WATCH expression [expression...]]
+
+Adds one or more breakpoints, returns the breakpoint id(s). Breakpoints come in two flavors: line and watch. A line breakpoint (the default, also explicitly definable with the `LINE` switch) is a line number that will cause the debugger to stop when it reaches it during the script's execution. A watch breakpoint (a.k.a watchpoint) is explicitly added with the `WATCH` switch and are Lua expressions. Watch breakpoints are evaluated at every step of the script's execution and break when true .
+
+    BREM breakpoint-id [breakpoint-id...]
+
+Removes breakpoint(s) from the list by id. Reply is the new length of the breakpoints list.
+
+    BON / BOFF [breakpoint-id [breakpoint-id...]]
+
+Turns all (the default) or specific breakpoints on / off.
+
+    BCOUNT
+
+Returns the length of the breakpoints list.
+
+    BLIST [start end] [RAW]
+
+Returns the list of breakpoints. Allows ranges using the usual conventions and by default performs 0 -1. When the `RAW` switch is used, output is an array with two strings, the first for line breakpoints and the second for watch breakpoints, where each string is suitable for using with the `BADD` command
+
+    BFLUSH
+
+Clears the breakpoints list.
+
+### Redis Lua debug API
+
+**Note:** these inline debugger instructions should resolve to NOOP, unless in executed in a debug session.
+
+    redis.debugmode(enabled = True)
+
+Is used to disable the debugger (equivalent to issuing `END`) when used with a `False`. Can be used to re-enable the debugger again before the script ends.
+
+    redis.debugbreak([expression])
+
+Breaks the execution of the script on that line if `expression` is true or if none provided.
+
+    redis.debugtrace(redis.traceall | redis.traceline | redis.tracecode | redis.tracestack | redis.traceoff)
+
+Is the equivalent of issuing `TRON` with the respective switch, or `TROFF`.
+
+    redis.debugeval(expression)
+
+Is the equivalent of calling `DOEVAL` with the expression.
+
+    redis.debugprint(expression)
+
+Is the equivalent of calling `DOPRINT` with the expression.
+
+Implementation details/guidelines
 ---
 
-The implementation relies on the integration of [MobDebug][10], a remote debugger for Lua, into Redis. MobDebug uses the `debug` and [`luasocket`][11] libraries to expose an interactive debugger interface (via its server) into a running Lua script (the client). In addition MobDebug is integrated with [ZeroBrane Studio][12], a popular Lua IDE by the same author.
-
-### Debug client
-
-For a script to be a debug client, whether debugged locally or remotely, the following should be staged:
-* Both `mobdebug.lua` and `luasocket` are required
-* [TODO: verify] The vanilla debug library should be available: `_G.debug = require("debug")`
-* Call the `start` function (`require('mobdebug').start("remote-server-address")`)
-
-#### MobDebug client API
-
-MobDebug provides the following functions to use from the client:
-* start - starts a debugging session (should only be called once at the beginning)
-* loop - puts the client in an idle loop until the server sends a script for execution
-* off - toggles debugging off
-* on - toggles debugging on
-
-Toggling debugging is useful and could be present in production scripts. An abstraction over MobDebug will keep the Redis Lua semantics consistent and facilitate executing the toggle or NOOP in the context of debugging or normal execution, respectively. Proposed semantics:
-* redis.debug-start("remote-server-address") - hidden, auto-injected for debug sessions
-* redis.debug-loop()
-* redis.debug-off()
-* redis.debug-on()
-
-### Remote debug server
-
-A remote debug server can be any MobDebug-compatible server such as running `require("mobdebug").listen()` or ZeroBrane Studio's.
-
-### Local debug server
-
-A local debug server in Redis is extremely interesting as it will allow debugging Lua scripts without the need for additional 3rd party tools. As Redis already ships with an embedded Lua engine, running the debug server in it makes more sense than, for example, adding Lua to redis-cli just for that purpose.
-
-A *rough* outline for implementing the local debug server in Redis is as follows:
-1. Create a Lua context for the debug server
-2. In the debug server's context run `require("mobdebug").listen()`
-3. Figure out how to connect the client and server via their sockets
-4. Route the server's output to the client running `SCRIPT DEBUG` and the input to the client's messages
-
-Open topics
----
-* Debugged scripts should not be cached
-* Debugged scripts can break replication
-* Slow script protection needs to be disabled for debug sessions
-* RESP may need to be tweaked to sustain the LOCAL mode back and forth
-* redis-cli needs to be taught about "SCRIPT DEBUG LOCAL" mode
-* luasocket in Redis Lua... interesting, should it remain exposed?
-* Should the local debug socket be configurable or randomly chosen by Redis?
+* External dependencies are usually not worth it.
+* Redis core should provide an entire debugging environment (that does not mean, however, that an external UI can't be developed/adapted for it - we provide the tools...)
+* Avoid sandbox pollution & heisenbugs by implementing the debugger outside the Lua VM.
+* Debugger could be implemented in its own Lua VM or in C.
+* Teach redis-cli some debugging finesse.
+* Debug sessions are tricky in the context of an operational Redis server. Because a debug session is highly blocking, special consideration should be given to the following topics:
+ * Replication: the default `REPL_ALL` mode isn't likely to tolerate an loose random debugger. We could possibly enforce the `REPL_NONE` (or `REPL_AOF`) mode, but that may result in different behaviors in development and production. Alternatively, debug could be disabled if the instance has any slaves connected.
+ * Connected clients
+ * High availability in general and Sentinel in particular
+ * Redis cluster
+* Caching debugged scripts appears to be of little or no value.
+* Slow script protection may need to be disabled for debug sessions, but `SCRIPT KILL` should do the trick regardless.
 
  [1]: https://en.wikipedia.org/wiki/Tracing_(software) "Tracing (software)"
  [2]: https://en.wikipedia.org/wiki/Debugging "Debugging"
@@ -99,6 +218,3 @@ Open topics
  [7]: https://redislabs.com/blog/cve-2015-4335-dsa-3279-redis-lua-sandbox-escape "Redis Lua Sandbox Escape"
  [8]:  https://github.com/antirez/redis/commit/30278061cc834b4073b004cb1a2bfb0f195734f7 "commit 30278061cc834b4073b004cb1a2bfb0f195734f7: hide access to debug table"
  [9]: http://www.trikoder.net/blog/redis-and-lua-scripts-new-workflow-89 "Redis and Lua scripts - new workflow"
- [10]: https://github.com/pkulchenko/MobDebug "MobDebug"
- [11]: https://github.com/diegonehab/luasocket "luasocket"
- [12]: http://studio.zerobrane.com/doc-remote-debugging "ZeroBrane Studio - Remote Debugging"
